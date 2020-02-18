@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 //SSE name constants
@@ -37,7 +38,7 @@ func liveReq(verb, uri string, body io.Reader) (*http.Request, error) {
 type Event struct {
 	URI  string
 	Type string
-	Data io.Reader
+	Data []byte
 }
 
 //GetReq is a function to return a single request. It will be used by notify to
@@ -51,7 +52,7 @@ var GetReq = func(verb, uri string, body io.Reader) (*http.Request, error) {
 //down the channel when recieved, until the stream is closed. It will then
 //close the stream. This is blocking, and so you will likely want to call this
 //in a new goroutine (via `go Notify(..)`)
-func Notify(uri string, evCh chan<- *Event) error {
+func Notify(uri string, evCh chan<- *Event) (err error) {
 	if evCh == nil {
 		return ErrNilChan
 	}
@@ -65,43 +66,62 @@ func Notify(uri string, evCh chan<- *Event) error {
 	if err != nil {
 		return fmt.Errorf("error performing request for %s: %v", uri, err)
 	}
+	defer func() {
+		err = res.Body.Close() // return err, if any, to the caller
+	}()
 
 	br := bufio.NewReader(res.Body)
-	defer res.Body.Close()
-
-	delim := []byte{':', ' '}
-
+	delim := []byte{':'}
 	var currEvent *Event
+	var bs []byte
 
 	for {
-		bs, err := br.ReadBytes('\n')
-
-		if err != nil && err != io.EOF {
-			return err
-		}
-
-		if len(bs) < 2 {
-			continue
-		}
-
-		spl := bytes.Split(bs, delim)
-
-		if len(spl) < 2 {
-			continue
-		}
-
-		currEvent = &Event{URI: uri}
-		switch string(spl[0]) {
-		case eName:
-			currEvent.Type = string(bytes.TrimSpace(spl[1]))
-		case dName:
-			currEvent.Data = bytes.NewBuffer(bytes.TrimSpace(spl[1]))
-			evCh <- currEvent
-		}
+		bs, err = br.ReadBytes('\n')
 		if err == io.EOF {
-			break
+			return nil
+		}
+		if err != nil {
+			return
+		}
+
+		if currEvent != nil && len(bs) == 1 { // implies bs[0] == \n i.e. event is finished
+			if len(currEvent.Data) != 0 { // remove trailing \n
+				currEvent.Data = currEvent.Data[:len(currEvent.Data)-1]
+			}
+			evCh <- currEvent
+			currEvent = nil // stop assembling a new event
+			continue
+		}
+		if bs[0] == ':' {
+			continue // comment, do nothing
+		}
+
+		// if there is more than one delimiter, then the others are part of the value
+		bs = bs[:len(bs)-1] // strip newline included by br.ReadBytes
+		spl := bytes.SplitAfterN(bs, delim, 2)
+		name := strings.TrimRight(string(spl[0]), ":") // don't include the delimiter itself
+		var val []byte
+		if len(spl) > 1 {
+			val = spl[1]
+			if len(val) != 0 && val[0] == ' ' {
+				val = val[1:]
+			}
+		}
+
+		// if the line does not start with an acceptable field name, i.e. none of the cases below
+		// are hit, we don't want to start assembling a new event; so we use this getter below
+		event := func() *Event {
+			if currEvent == nil {
+				currEvent = &Event{}
+			}
+			return currEvent
+		}
+
+		switch name {
+		case eName:
+			event().Type = name
+		case dName:
+			event().Data = append(currEvent.Data, append(val, '\n')...)
 		}
 	}
-
-	return nil
 }

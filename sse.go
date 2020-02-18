@@ -18,6 +18,8 @@ const (
 var (
 	//ErrNilChan will be returned by Notify if it is passed a nil channel
 	ErrNilChan = fmt.Errorf("nil channel given")
+
+	delim = []byte{':'}
 )
 
 //Client is the default client used for requests.
@@ -70,10 +72,17 @@ func Notify(uri string, evCh chan<- *Event) (err error) {
 		err = res.Body.Close() // return err, if any, to the caller
 	}()
 
-	br := bufio.NewReader(res.Body)
-	delim := []byte{':'}
-	var currEvent *Event
-	var bs []byte
+	err = loop(res.Body, uri, evCh)
+	return
+}
+
+func loop(body io.Reader, uri string, evCh chan<- *Event) error {
+	var (
+		currEvent *Event
+		bs        []byte
+		err       error
+		br        = bufio.NewReader(body)
+	)
 
 	for {
 		bs, err = br.ReadBytes('\n')
@@ -81,7 +90,7 @@ func Notify(uri string, evCh chan<- *Event) (err error) {
 			return nil
 		}
 		if err != nil {
-			return
+			return err
 		}
 
 		if currEvent != nil && len(bs) == 1 { // implies bs[0] == \n i.e. event is finished
@@ -108,20 +117,17 @@ func Notify(uri string, evCh chan<- *Event) (err error) {
 			}
 		}
 
-		// if the line does not start with an acceptable field name, i.e. none of the cases below
-		// are hit, we don't want to start assembling a new event; so we use this getter below
-		event := func() *Event {
-			if currEvent == nil {
-				currEvent = &Event{}
-			}
-			return currEvent
-		}
-
 		switch name {
 		case eName:
-			event().Type = name
+			if currEvent == nil {
+				currEvent = &Event{URI: uri}
+			}
+			currEvent.Type = string(val)
 		case dName:
-			event().Data = append(currEvent.Data, append(val, '\n')...)
+			if currEvent == nil {
+				currEvent = &Event{URI: uri}
+			}
+			currEvent.Data = append(currEvent.Data, append(val, '\n')...)
 		}
 	}
 }

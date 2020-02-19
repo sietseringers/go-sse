@@ -71,6 +71,13 @@ func Notify(uri string, evCh chan<- *Event) (err error) {
 	defer func() {
 		err = res.Body.Close() // return err, if any, to the caller
 	}()
+	if res.StatusCode != 200 {
+		return fmt.Errorf("%s returned unexpected status: %d", uri, res.StatusCode)
+	}
+	contenttype := res.Header.Get("Content-Type")
+	if contenttype != "text/event-stream" {
+		return fmt.Errorf("%s returned unexpected Content-Type: %s", uri, contenttype)
+	}
 
 	err = loop(res.Body, uri, evCh)
 	return

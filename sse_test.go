@@ -4,14 +4,16 @@ import (
 	"bytes"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// Example streams taken from the spec,
+// Test streams, of which the first three come from the spec,
 // https://html.spec.whatwg.org/multipage/server-sent-events.html
 var (
-	stream0 = `data: This is the first message.
+	specStream1 = `data: This is the first message.
 
 data: This is the second message, it
 data: has two lines.
@@ -19,33 +21,47 @@ data: has two lines.
 data: This is the third message.
 
 `
-	stream1 = `: test stream
+
+	specStream2 = `: test stream
 
 data: first event
 id: 1
 
-event: event name
 data:second event
 id
 
 data:  third event`
-	stream2 = `data
+
+	specStream3 = `data
 
 data
 data
 
 data:`
 
-	// test stream not from the spec
+	nameStream = `event: 1
+data: event 1
+
+event: 2
+data: event 2
+
+`
+
 	// tests: multiple empty lines do nothing, and unknown field names do nothing
 	// (in particular, don't send empty events in these cases)
-	stream3 = `data: event 1
+	invalidInputStream = `data: event 1
 
 
 foo: bar
 
 
 data: event 2
+
+`
+
+	// tests retry time
+	retryStream = `data: event 1
+retry: 2000
 
 `
 )
@@ -55,10 +71,11 @@ func TestEventStream(t *testing.T) {
 		name   string
 		stream string
 		events []*Event
+		wait   time.Duration
 	}{
 		{
-			name:   "0",
-			stream: stream0,
+			name:   "specStream1",
+			stream: specStream1,
 			events: []*Event{
 				{Data: []byte("This is the first message.")},
 				{Data: []byte("This is the second message, it\nhas two lines.")},
@@ -66,28 +83,44 @@ func TestEventStream(t *testing.T) {
 			},
 		},
 		{
-			name:   "1",
-			stream: stream1,
+			name:   "specStream2",
+			stream: specStream2,
 			events: []*Event{
 				{Data: []byte("first event")},
-				{Data: []byte("second event"), Type: "event name"},
+				{Data: []byte("second event")},
 			},
 		},
 		{
-			name:   "2",
-			stream: stream2,
+			name:   "specStream3",
+			stream: specStream3,
 			events: []*Event{
 				{Data: []byte{}},
 				{Data: []byte{'\n'}},
 			},
 		},
 		{
-			name:   "3",
-			stream: stream3,
+			name:   "nameStream",
+			stream: nameStream,
+			events: []*Event{
+				{Data: []byte("event 1"), Type: "1"},
+				{Data: []byte("event 2"), Type: "2"},
+			},
+		},
+		{
+			name:   "invalidInputStream",
+			stream: invalidInputStream,
 			events: []*Event{
 				{Data: []byte("event 1")},
 				{Data: []byte("event 2")},
 			},
+		},
+		{
+			name:   "retryStream",
+			stream: retryStream,
+			events: []*Event{
+				{Data: []byte("event 1")},
+			},
+			wait: 2000 * time.Millisecond,
 		},
 	}
 
@@ -101,7 +134,13 @@ func TestEventStream(t *testing.T) {
 
 			wg.Add(2)
 			go func() {
-				require.NoError(t, loop(bytes.NewReader([]byte(tt.stream)), "", evCh))
+				expectedWait := defaultWait
+				if tt.wait != 0 {
+					expectedWait = tt.wait
+				}
+				wait, err := loop(bytes.NewReader([]byte(tt.stream)), "", defaultWait, evCh)
+				assert.NoError(t, err)
+				assert.Equal(t, expectedWait, wait)
 				close(evCh)
 				wg.Done()
 			}()

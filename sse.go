@@ -7,13 +7,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 )
 
 //SSE name constants
 const (
 	eName = "event"
 	dName = "data"
+	rName = "retry"
+
+	defaultWait = 1000 * time.Millisecond
 )
 
 var (
@@ -52,42 +57,58 @@ var GetReq = func(ctx context.Context, verb, uri string) (*http.Request, error) 
 }
 
 //Notify takes the uri of an SSE stream and channel, and will send an Event
-//down the channel when recieved, until the stream is closed. It will then
+//down the channel when received, until the stream is closed. It will then
 //close the stream. This is blocking, and so you will likely want to call this
 //in a new goroutine (via `go Notify(..)`)
-func Notify(ctx context.Context, uri string, evCh chan<- *Event) (err error) {
+func Notify(ctx context.Context, uri string, retry bool, evCh chan<- *Event) (err error) {
 	if evCh == nil {
 		return ErrNilChan
 	}
-
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	req, err := liveReq(ctx, "GET", uri)
-	if err != nil {
-		return fmt.Errorf("error getting sse request: %v", err)
+
+	wait := defaultWait
+	for {
+		req, err := liveReq(ctx, "GET", uri)
+		if err != nil {
+			return fmt.Errorf("error getting sse request: %v", err)
+		}
+
+		res, err := Client.Do(req)
+		if err != nil {
+			return fmt.Errorf("error performing request for %s: %v", uri, err)
+		}
+		defer func() {
+			err = res.Body.Close() // return err, if any, to the caller
+		}()
+
+		if res.StatusCode != 200 {
+			return fmt.Errorf("%s returned unexpected status: %d", uri, res.StatusCode)
+		}
+		contenttype := res.Header.Get("Content-Type")
+		if contenttype != "text/event-stream" {
+			return fmt.Errorf("%s returned unexpected Content-Type: %s", uri, contenttype)
+		}
+
+		wait, err = loop(res.Body, uri, wait, evCh)
+		if !retry {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			break
+		default: // just continue
+		}
+
+		// wait before reconnecting according to the current reconnection time
+		time.Sleep(wait)
 	}
 
-	res, err := Client.Do(req)
-	if err != nil {
-		return fmt.Errorf("error performing request for %s: %v", uri, err)
-	}
-	defer func() {
-		err = res.Body.Close() // return err, if any, to the caller
-	}()
-	if res.StatusCode != 200 {
-		return fmt.Errorf("%s returned unexpected status: %d", uri, res.StatusCode)
-	}
-	contenttype := res.Header.Get("Content-Type")
-	if contenttype != "text/event-stream" {
-		return fmt.Errorf("%s returned unexpected Content-Type: %s", uri, contenttype)
-	}
-
-	err = loop(res.Body, uri, evCh)
 	return
 }
 
-func loop(body io.Reader, uri string, evCh chan<- *Event) error {
+func loop(body io.Reader, uri string, wait time.Duration, evCh chan<- *Event) (time.Duration, error) {
 	var (
 		currEvent *Event
 		bs        []byte
@@ -98,10 +119,10 @@ func loop(body io.Reader, uri string, evCh chan<- *Event) error {
 	for {
 		bs, err = br.ReadBytes('\n')
 		if err == io.EOF {
-			return nil
+			return wait, nil
 		}
 		if err != nil {
-			return err
+			return wait, err
 		}
 
 		if currEvent != nil && len(bs) == 1 { // implies bs[0] == \n i.e. event is finished
@@ -129,6 +150,12 @@ func loop(body io.Reader, uri string, evCh chan<- *Event) error {
 		}
 
 		switch name {
+		case rName:
+			i, err := strconv.ParseUint(string(val), 10, 64)
+			if err != nil {
+				continue // just continue
+			}
+			wait = time.Duration(i) * time.Millisecond
 		case eName:
 			if currEvent == nil {
 				currEvent = &Event{URI: uri}

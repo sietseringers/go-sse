@@ -3,6 +3,7 @@ package sse // import "astuart.co/go-sse"
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,8 +26,8 @@ var (
 //Client is the default client used for requests.
 var Client = &http.Client{}
 
-func liveReq(verb, uri string, body io.Reader) (*http.Request, error) {
-	req, err := GetReq(verb, uri, body)
+func liveReq(ctx context.Context, verb, uri string) (*http.Request, error) {
+	req, err := GetReq(ctx, verb, uri)
 	if err != nil {
 		return nil, err
 	}
@@ -46,20 +47,23 @@ type Event struct {
 //GetReq is a function to return a single request. It will be used by notify to
 //get a request and can be replaces if additional configuration is desired on
 //the request. The "Accept" header will necessarily be overwritten.
-var GetReq = func(verb, uri string, body io.Reader) (*http.Request, error) {
-	return http.NewRequest(verb, uri, body)
+var GetReq = func(ctx context.Context, verb, uri string) (*http.Request, error) {
+	return http.NewRequestWithContext(ctx, verb, uri, nil)
 }
 
 //Notify takes the uri of an SSE stream and channel, and will send an Event
 //down the channel when recieved, until the stream is closed. It will then
 //close the stream. This is blocking, and so you will likely want to call this
 //in a new goroutine (via `go Notify(..)`)
-func Notify(uri string, evCh chan<- *Event) (err error) {
+func Notify(ctx context.Context, uri string, evCh chan<- *Event) (err error) {
 	if evCh == nil {
 		return ErrNilChan
 	}
 
-	req, err := liveReq("GET", uri, nil)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := liveReq(ctx, "GET", uri)
 	if err != nil {
 		return fmt.Errorf("error getting sse request: %v", err)
 	}

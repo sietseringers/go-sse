@@ -179,7 +179,7 @@ func TestEventStream(t *testing.T) {
 }
 
 func TestReconnect(t *testing.T) {
-	server := startServer(t)
+	server := disconnectingServer(t)
 	defer server.Close()
 
 	var (
@@ -213,7 +213,35 @@ func TestReconnect(t *testing.T) {
 	)
 }
 
-func startServer(t *testing.T) *httptest.Server {
+func TestDisconnect(t *testing.T) {
+	server, done := waitingServer(t)
+	defer server.Close()
+
+	var (
+		evCh        = make(chan *Event)
+		wg          = sync.WaitGroup{}
+		ctx, cancel = context.WithCancel(context.Background())
+	)
+
+	wg.Add(2)
+	go func() {
+		err := Notify(ctx, server.URL, true, evCh)
+		assert.Error(t, err)
+		assert.True(t, strings.HasSuffix(err.Error(), "context canceled"))
+		wg.Done()
+	}()
+	go func() {
+		<-done
+		wg.Done()
+	}()
+
+	// give Notify time to send its request
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	wg.Wait()
+}
+
+func disconnectingServer(t *testing.T) *httptest.Server {
 	var count int
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch count {
@@ -227,4 +255,12 @@ func startServer(t *testing.T) *httptest.Server {
 			w.WriteHeader(204)
 		}
 	}))
+}
+
+func waitingServer(t *testing.T) (*httptest.Server, chan struct{}) {
+	done := make(chan struct{})
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done() // wait for the client to go away
+		done <- struct{}{}
+	})), done
 }

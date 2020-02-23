@@ -17,6 +17,7 @@ const (
 	eName = "event"
 	dName = "data"
 	rName = "retry"
+	iName = "id"
 
 	defaultWait = 1000 * time.Millisecond
 )
@@ -31,12 +32,15 @@ var (
 //Client is the default client used for requests.
 var Client = &http.Client{}
 
-func liveReq(ctx context.Context, verb, uri string) (*http.Request, error) {
+func liveReq(ctx context.Context, verb, lastEventID, uri string) (*http.Request, error) {
 	req, err := GetReq(ctx, verb, uri)
 	if err != nil {
 		return nil, err
 	}
 
+	if lastEventID != "" {
+		req.Header.Set("Last-Event-ID", lastEventID)
+	}
 	req.Header.Set("Accept", "text/event-stream")
 
 	return req, nil
@@ -45,6 +49,7 @@ func liveReq(ctx context.Context, verb, uri string) (*http.Request, error) {
 //Event is a go representation of an http server-sent event
 type Event struct {
 	URI  string
+	ID   string
 	Type string
 	Data []byte
 }
@@ -69,8 +74,9 @@ func Notify(ctx context.Context, uri string, retry bool, evCh chan<- *Event) (er
 	}
 
 	wait := defaultWait
+	var id string
 	for {
-		req, err := liveReq(ctx, "GET", uri)
+		req, err := liveReq(ctx, "GET", id, uri)
 		if err != nil {
 			return fmt.Errorf("error getting sse request: %v", err)
 		}
@@ -91,7 +97,7 @@ func Notify(ctx context.Context, uri string, retry bool, evCh chan<- *Event) (er
 			return fmt.Errorf("%s returned unexpected Content-Type: %s", uri, contenttype)
 		}
 
-		wait, err = loop(res.Body, uri, wait, evCh)
+		wait, id, err = loop(res.Body, uri, wait, id, evCh)
 		if !retry {
 			break
 		}
@@ -108,7 +114,7 @@ func Notify(ctx context.Context, uri string, retry bool, evCh chan<- *Event) (er
 	return
 }
 
-func loop(body io.Reader, uri string, wait time.Duration, evCh chan<- *Event) (time.Duration, error) {
+func loop(body io.Reader, uri string, wait time.Duration, id string, evCh chan<- *Event) (time.Duration, string, error) {
 	var (
 		currEvent *Event
 		bs        []byte
@@ -119,16 +125,17 @@ func loop(body io.Reader, uri string, wait time.Duration, evCh chan<- *Event) (t
 	for {
 		bs, err = br.ReadBytes('\n')
 		if err == io.EOF {
-			return wait, nil
+			return wait, id, nil
 		}
 		if err != nil {
-			return wait, err
+			return wait, id, err
 		}
 
 		if currEvent != nil && len(bs) == 1 { // implies bs[0] == \n i.e. event is finished
 			if len(currEvent.Data) != 0 { // remove trailing \n
 				currEvent.Data = currEvent.Data[:len(currEvent.Data)-1]
 			}
+			currEvent.ID = id
 			evCh <- currEvent
 			currEvent = nil // stop assembling a new event
 			continue
@@ -156,6 +163,8 @@ func loop(body io.Reader, uri string, wait time.Duration, evCh chan<- *Event) (t
 				continue // just continue
 			}
 			wait = time.Duration(i) * time.Millisecond
+		case iName:
+			id = string(val)
 		case eName:
 			if currEvent == nil {
 				currEvent = &Event{URI: uri}

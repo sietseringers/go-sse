@@ -59,6 +59,14 @@ data: event 2
 
 `
 
+	// tests: ID carries over into next events
+	idStream = `id: 1
+data: event 1
+
+data: event 2
+
+`
+
 	// tests retry time
 	retryStream = `data: event 1
 retry: 2000
@@ -86,7 +94,7 @@ func TestEventStream(t *testing.T) {
 			name:   "specStream2",
 			stream: specStream2,
 			events: []*Event{
-				{Data: []byte("first event")},
+				{Data: []byte("first event"), ID: "1"},
 				{Data: []byte("second event")},
 			},
 		},
@@ -115,6 +123,14 @@ func TestEventStream(t *testing.T) {
 			},
 		},
 		{
+			name:   "idStream",
+			stream: idStream,
+			events: []*Event{
+				{Data: []byte("event 1"), ID: "1"},
+				{Data: []byte("event 2"), ID: "1"},
+			},
+		},
+		{
 			name:   "retryStream",
 			stream: retryStream,
 			events: []*Event{
@@ -138,7 +154,7 @@ func TestEventStream(t *testing.T) {
 				if tt.wait != 0 {
 					expectedWait = tt.wait
 				}
-				wait, err := loop(bytes.NewReader([]byte(tt.stream)), "", defaultWait, evCh)
+				wait, _, err := loop(bytes.NewReader([]byte(tt.stream)), "", defaultWait, "", evCh)
 				assert.NoError(t, err)
 				assert.Equal(t, expectedWait, wait)
 				close(evCh)

@@ -2,6 +2,11 @@ package sse
 
 import (
 	"bytes"
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -171,4 +176,55 @@ func TestEventStream(t *testing.T) {
 			require.Equal(t, tt.events, events)
 		})
 	}
+}
+
+func TestReconnect(t *testing.T) {
+	server := startServer(t)
+	defer server.Close()
+
+	var (
+		events []*Event
+		evCh   = make(chan *Event)
+		wg     = sync.WaitGroup{}
+	)
+	wg.Add(2)
+	go func() {
+		err := Notify(context.Background(), server.URL, true, evCh)
+		assert.Error(t, err)
+		assert.True(t, strings.HasSuffix(err.Error(), strconv.Itoa(204)))
+		close(evCh)
+		wg.Done()
+	}()
+	go func() {
+		for event := range evCh {
+			events = append(events, event)
+		}
+		wg.Done()
+	}()
+	wg.Wait()
+
+	require.Equal(t,
+		[]*Event{{
+			Data: []byte("event 1"),
+			URI:  server.URL,
+			ID:   "myid",
+		}},
+		events,
+	)
+}
+
+func startServer(t *testing.T) *httptest.Server {
+	var count int
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch count {
+		case 0:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, err := w.Write([]byte("data: event 1\nretry: 100\nid: myid\n\n"))
+			assert.NoError(t, err)
+			count++
+		default:
+			require.Equal(t, "myid", r.Header.Get("Last-Event-ID"))
+			w.WriteHeader(204)
+		}
+	}))
 }

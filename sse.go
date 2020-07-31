@@ -73,20 +73,29 @@ func Notify(ctx context.Context, uri string, retry bool, evCh chan<- *Event) (er
 		ctx = context.Background()
 	}
 
-	wait := defaultWait
-	var id string
+	var (
+		wait = defaultWait
+		id   string
+		req  *http.Request
+		res  *http.Response
+	)
 	for {
-		req, err := liveReq(ctx, "GET", id, uri)
+		req, err = liveReq(ctx, "GET", id, uri)
 		if err != nil {
 			return fmt.Errorf("error getting sse request: %v", err)
 		}
 
-		res, err := Client.Do(req)
+		res, err = Client.Do(req)
 		if err != nil {
 			return fmt.Errorf("error performing request for %s: %v", uri, err)
 		}
 		defer func() {
-			err = res.Body.Close() // return err, if any, to the caller
+			if res == nil || res.Body == nil {
+				return
+			}
+			if e := res.Body.Close(); err == nil { // prioritize err over e
+				err = e
+			}
 		}()
 
 		if res.StatusCode != 200 {

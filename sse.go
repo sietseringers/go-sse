@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/ioutil"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,11 +28,15 @@ var (
 	//ErrNilChan will be returned by Notify if it is passed a nil channel
 	ErrNilChan = fmt.Errorf("nil channel given")
 
+	//Client is the default client used for requests.
+	Client = &http.Client{}
+
+	//Logger is used to log debug messages. By default logging is disabled;
+	//to enable, use SetOutput() or overwrite this instance.
+	Logger = log.New(ioutil.Discard, "", log.LstdFlags)
+
 	delim = []byte{':'}
 )
-
-//Client is the default client used for requests.
-var Client = &http.Client{}
 
 func liveReq(ctx context.Context, verb, lastEventID, uri string) (*http.Request, error) {
 	req, err := GetReq(ctx, verb, uri)
@@ -106,21 +112,23 @@ func Notify(ctx context.Context, uri string, retry bool, evCh chan<- *Event) (er
 			return fmt.Errorf("%s returned unexpected Content-Type: %s", uri, contenttype)
 		}
 
+		Logger.Print("connected, reading lines")
 		wait, id, err = loop(res.Body, uri, wait, id, evCh)
 		if !retry {
-			break
+			return
 		}
 		select {
 		case <-ctx.Done():
 			break
-		default: // just continue
+		default: // log error, then just continue loop
+			if err != nil {
+				Logger.Printf("error: %s, reconnecting", err.Error())
+			}
 		}
 
 		// wait before reconnecting according to the current reconnection time
 		time.Sleep(wait)
 	}
-
-	return
 }
 
 func loop(body io.Reader, uri string, wait time.Duration, id string, evCh chan<- *Event) (time.Duration, string, error) {
@@ -133,14 +141,12 @@ func loop(body io.Reader, uri string, wait time.Duration, id string, evCh chan<-
 
 	for {
 		bs, err = br.ReadBytes('\n')
-		if err == io.EOF {
-			return wait, id, nil
-		}
 		if err != nil {
 			return wait, id, err
 		}
 
 		if currEvent != nil && len(bs) == 1 { // implies bs[0] == \n i.e. event is finished
+			Logger.Print("received new event")
 			if len(currEvent.Data) != 0 { // remove trailing \n
 				currEvent.Data = currEvent.Data[:len(currEvent.Data)-1]
 			}
@@ -150,8 +156,11 @@ func loop(body io.Reader, uri string, wait time.Duration, id string, evCh chan<-
 			continue
 		}
 		if bs[0] == ':' {
+			Logger.Print("comment, ignoring")
 			continue // comment, do nothing
 		}
+
+		Logger.Print("received line of length ", len(bs))
 
 		// if there is more than one delimiter, then the others are part of the value
 		bs = bs[:len(bs)-1] // strip newline included by br.ReadBytes
@@ -169,6 +178,7 @@ func loop(body io.Reader, uri string, wait time.Duration, id string, evCh chan<-
 		case rName:
 			i, err := strconv.ParseUint(string(val), 10, 64)
 			if err != nil {
+				Logger.Printf("failed to parse retry field as unsigned integer: %s, ignoring", err.Error())
 				continue // just continue
 			}
 			wait = time.Duration(i) * time.Millisecond
